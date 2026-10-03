@@ -1,9 +1,4 @@
-// =====================================================================
-// t4x_core.cpp — Ultimate Hardened Enterprise Native Engine
-// Architecture: ARM64 / AArch64 (Direct SVC + Multi-Layer Anti-Tamper)
-// Targets: Anti-Debug, Anti-Frida, Anti-Hook, Anti-Root, Signature Lock
-// =====================================================================
-
+// t4x_core.cpp — Ultimate Hardened Enterprise Native Engine || Architecture: ARM64 / AArch64 (Direct SVC + Multi-Layer Anti-Tamper) || Targets: Anti-Debug, Anti-Frida, Anti-Hook, Anti-Root, Signature Lock
 #include <jni.h>
 #include <pthread.h>
 #include <unistd.h>
@@ -29,26 +24,14 @@
 #include <atomic>
 #include <android/log.h>
 
-// =====================================================================
 // 0. CONFIGURATION LAYER (App-Specific Hardening Target)
-// =====================================================================
-
-// --- Per-build obfuscation seed -------------------------------------
-// Override via -DT4_BUILD_SEED=0x.... per release build so every APK
-// variant carries a different keystream (defeats a single shared
-// decryptor script working across all your builds/releases).
+// --- Per-build obfuscation seed // Override via -DT4_BUILD_SEED=0x.... per release build so every APK // variant carries a different keystream (defeats a single shared // decryptor script working across all your builds/releases).
 #ifndef T4_BUILD_SEED
 #define T4_BUILD_SEED 0x9E3779B97F4A7C15ULL
 #endif
-
 constexpr unsigned char XK = 0xB3; // legacy byte, kept only for layout compat
 
-// Multiplicative, seed-mixed keystream instead of a flat "XK + i" ramp.
-// A fixed-add keystream is recoverable in bulk with one script across every
-// string in the binary; splitmix64-derived bytes are not linear in i, so an
-// attacker has to defeat the derivation per-build, not just subtract a known
-// constant. This still isn't "unbreakable" -- it's reachable at runtime by
-// definition -- it just stops casual `strings`/bulk-XOR extraction.
+// Multiplicative, seed-mixed keystream instead of a flat "XK + i" ramp. // A fixed-add keystream is recoverable in bulk with one script across every // string in the binary; splitmix64-derived bytes are not linear in i, so an // attacker has to defeat the derivation per-build, not just subtract a known // constant. This still isn't "unbreakable" -- it's reachable at runtime by // definition -- it just stops casual `strings`/bulk-XOR extraction.
 constexpr uint64_t t4_mix64(uint64_t x) {
     x += 0x9E3779B97F4A7C15ULL;
     x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ULL;
@@ -97,9 +80,6 @@ static const uint8_t CFG_TARGET_CERT_SHA256[32] = {
     0x31, 0xA6, 0x7F, 0x68, 0xC2, 0x57, 0xAC, 0x59
 };
 
-
-
-
 // Android Bionic fdsan fatal crash bypass (Android 10 - 15)
 static void disable_fdsan() {
     void *libc = dlopen("libc.so", RTLD_NOW);
@@ -114,9 +94,7 @@ static void disable_fdsan() {
     }
 }
 
-// =====================================================================
 // 1. EMBEDDED SHA-256 ENGINE (External Dependency Free)
-// =====================================================================
 
 struct T4_SHA256_CTX {
     uint32_t state[8];
@@ -207,10 +185,7 @@ static bool safe_mem_cmp(const void *a, const void *b, size_t n) {
     for (size_t i = 0; i < n; i++) diff |= (pa[i] ^ pb[i]);
     return (diff == 0);
 }
-
-// =====================================================================
 // 2. DIRECT SYSCALL ENGINE (L0: AArch64 SVC Raw Calls)
-// =====================================================================
 
 #if defined(__aarch64__)
 static inline long rs(long n, long a = 0, long b = 0, long c = 0,
@@ -264,9 +239,9 @@ static void r_sleep_ms(long ms) {
     rs(__NR_nanosleep, (long)&ts, 0);
 }
 
-// =====================================================================
+
 // 3. DEFENSE AND DEFERRED TERMINATION ENGINE
-// =====================================================================
+
 
 static long g_pid = 0;
 static std::atomic<int> g_hits{0};
@@ -281,7 +256,6 @@ static unsigned xr() {
     return g_rng;
 }
 
-
 static void threat() {
     g_hits.fetch_add(1, std::memory_order_relaxed);
     long now = r_clock_ms();
@@ -294,23 +268,10 @@ static void threat() {
     }
 }
 
-// =====================================================================
+
 // 3b. INTEGRITY-GATED RUNTIME KEY
-// =====================================================================
-// IMPORTANT ARCHITECTURAL NOTE: every check above this point only flips a
-// flag. A single patched branch (one `cbz`/`b` NOP) defeats a flag-based
-// gate completely, regardless of how many checks feed it. The fix is to
-// stop gating with a boolean and instead derive a key material value that
-// your *real* sensitive logic needs to function correctly:
-//   - decrypt critical strings/config/license data
-//   - compute an HMAC the server checks before accepting a request
-//   - unlock a code path (not just "run or don't run" -- produce wrong
-//     output silently if checks fail, which is far harder to notice and
-//     patch around than a crash)
-// g_ikey only comes out correct if every sweep has been passing since
-// init. A hooked/patched check doesn't just fail to detect -- it corrupts
-// the key your app actually needs, so "bypass" requires reproducing the
-// correct key material, not just suppressing a kill call.
+
+// IMPORTANT ARCHITECTURAL NOTE: every check above this point only flips a// flag. A single patched branch (one `cbz`/`b` NOP) defeats a flag-based// gate completely, regardless of how many checks feed it. The fix is to// stop gating with a boolean and instead derive a key material value that// your *real* sensitive logic needs to function correctly://   - decrypt critical strings/config/license data//   - compute an HMAC the server checks before accepting a request//   - unlock a code path (not just "run or don't run" -- produce wrong//     output silently if checks fail, which is far harder to notice and//     patch around than a crash)// g_ikey only comes out correct if every sweep has been passing since// init. A hooked/patched check doesn't just fail to detect -- it corrupts// the key your app actually needs, so "bypass" requires reproducing the// correct key material, not just suppressing a kill call.
 static std::atomic<uint64_t> g_ikey{0};
 
 static void fold_key(bool check_passed, uint64_t salt) {
@@ -321,11 +282,7 @@ static void fold_key(bool check_passed, uint64_t salt) {
     g_ikey.store(next, std::memory_order_relaxed);
 }
 
-// Call this once after your real checks have run (see run_sweep) to get a
-// value you can XOR sensitive runtime data against. Treat it as "the key
-// is only right if history has been clean" -- do NOT branch on it with a
-// simple == comparison anywhere an attacker can find and patch; USE it as
-// key material in an actual decrypt/HMAC operation instead.
+// Call this once after your real checks have run (see run_sweep) to get a// value you can XOR sensitive runtime data against. Treat it as "the key// is only right if history has been clean" -- do NOT branch on it with a// simple == comparison anywhere an attacker can find and patch; USE it as// key material in an actual decrypt/HMAC operation instead.
 static uint64_t runtime_key() { return g_ikey.load(std::memory_order_relaxed); }
 
 [[noreturn]] static void terminate_now() {
@@ -344,10 +301,7 @@ static uint64_t runtime_key() { return g_ikey.load(std::memory_order_relaxed); }
     r_exit(9);
 }
 
-// =====================================================================
 // 4. LOW-LEVEL INSPECTION UTILITIES
-// =====================================================================
-
 static long slurp(const char *path, char *buf, long cap) {
     long fd = r_open(path, O_RDONLY);
     if (fd < 0) return -1;
@@ -401,10 +355,7 @@ static bool fexists_enc(const char (&enc)[N]) {
     return r == 0;
 }
 
-// =====================================================================
 // 5. PACKAGE & SIGNATURE INTEGRITY CHECKS
-// =====================================================================
-
 static bool verify_process_name_native() {
     char cmd[128] = {0};
     long n = slurp(XS("/proc/self/cmdline"), cmd, sizeof(cmd));
@@ -559,11 +510,7 @@ static bool verify_app_signature_jni(JNIEnv *env, jobject context) {
     // ৪. হার্ডকোডেড SHA-256 হ্যাশের সাথে মিল যাচাই
     return safe_mem_cmp(computed_hash, CFG_TARGET_CERT_SHA256, 32);
 }
-
-// =====================================================================
 // 6. CORE SECURITY INSPECTORS
-// =====================================================================
-
 static long g_guard_child = 0;
 static std::atomic<int> g_guard_on{0};
 static long g_guard_pipe = -1;
@@ -624,8 +571,6 @@ static constexpr auto XK_ranchu = Xe("ranchu");
 static constexpr auto XK_droid  = Xe("droid4x");
 static constexpr auto XK_nox    = Xe("nox");
 static constexpr auto XK_ttvm   = Xe("ttVM");
-
-
 
 
 static bool maps_clean() {
@@ -768,12 +713,7 @@ static bool root_clean() {
 
 
 
-// --- /proc/self/stat trace-state check -------------------------------
-// TracerPid in /proc/self/status is the common check and the common
-// bypass target (many Frida/Xposed unpackers patch exactly this field
-// read). The process state char in /proc/self/stat ('t' = tracing stop,
-// field 3) is a second, independently-read signal that isn't defeated by
-// the same patch.
+// --- /proc/self/stat trace-state check -------------------------------// TracerPid in /proc/self/status is the common check and the common// bypass target (many Frida/Xposed unpackers patch exactly this field// read). The process state char in /proc/self/stat ('t' = tracing stop,// field 3) is a second, independently-read signal that isn't defeated by// the same patch.
 static bool trace_state_clean() {
     char b[512];
     long n = slurp(XS("/proc/self/stat"), b, sizeof b);
@@ -786,13 +726,7 @@ static bool trace_state_clean() {
     return true;
 }
 
-// --- Timing-based single-step / breakpoint detection -------------------
-// A debugger single-stepping through or sitting on a breakpoint inside a
-// tight, known-cost loop inflates its wall-clock time far beyond native
-// execution, independent of ptrace-attach detection (catches hardware
-// breakpoints and some anti-anti-debug tooling that spoofs TracerPid).
-// Thresholds are intentionally loose to avoid false positives on loaded
-// low-end devices; tune per your target hardware before shipping.
+// --- Timing-based single-step / breakpoint detection -------------------// A debugger single-stepping through or sitting on a breakpoint inside a// tight, known-cost loop inflates its wall-clock time far beyond native// execution, independent of ptrace-attach detection (catches hardware// breakpoints and some anti-anti-debug tooling that spoofs TracerPid).// Thresholds are intentionally loose to avoid false positives on loaded// low-end devices; tune per your target hardware before shipping.
 static bool timing_clean() {
     long t0 = r_clock_ms();
     volatile uint64_t acc = 0;
@@ -984,10 +918,7 @@ static bool selftext_clean() {
     return !g_tx_h || fnv1a((void *)g_tx, g_tx_n) == g_tx_h;
 }
 
-// =====================================================================
 // 7. PTRACE GUARD (FORKED MONITOR)
-// =====================================================================
-
 static void start_ptrace_guard() {
     long fds[2];
     if (r_pipe2(fds, 0) != 0) return; // [FIXED] 0 = Blocking pipe (O_NONBLOCK সরানো হয়েছে)
@@ -1064,10 +995,8 @@ static void poll_guard_pipe() {
     }
 }
 
-// =====================================================================
-// 8. DUAL JITTERED WATCHDOG THREADS
-// =====================================================================
 
+// 8. DUAL JITTERED WATCHDOG THREADS
 static std::atomic<uint32_t> g_hb[2] = {std::atomic<uint32_t>(0), std::atomic<uint32_t>(0)};
 
 static void run_sweep() {
@@ -1086,10 +1015,7 @@ static void run_sweep() {
     bool c12 = emulator_clean();
     bool c13 = root_clean();
 
-    // Each check folds into the key regardless of outcome, so a hook that
-    // forces one check's return value still corrupts the resulting key
-    // (it just diverges down the "failed" branch of fold_key instead of
-    // simply not being counted).
+    // Each check folds into the key regardless of outcome, so a hook that    // forces one check's return value still corrupts the resulting key  // (it just diverges down the "failed" branch of fold_key instead of    // simply not being counted).
     fold_key(c1, 0x1); fold_key(c2, 0x2);   fold_key(c3, 0x3);
     fold_key(c4, 0x4); fold_key(c5, 0x5);   fold_key(c6, 0x6);
     fold_key(c7, 0x7); fold_key(c8, 0x8);   fold_key(c9, 0x9);
@@ -1126,10 +1052,7 @@ static void *wd_main(void *arg) {
     return nullptr;
 }
 
-// =====================================================================
 // 9. INITIALIZATION & JNI EXPORTS
-// =====================================================================
-
 __attribute__((constructor))
 static void t4_core_init() {
     g_pid = r_getpid();
@@ -1184,10 +1107,7 @@ Java_com_t4_protection_T4ProxyApplication_validateEnvironment(JNIEnv *env, jclas
     return JNI_TRUE;
 }
 
-// Call this from your real decrypt/HMAC code -- NEVER from a simple
-// if/else you could NOP out. Treat a "wrong" key as normal operation that
-// silently produces garbage output, rather than a visible crash/refusal,
-// wherever that's workable for your use case.
+// Call this from your real decrypt/HMAC code -- NEVER from a simple// if/else you could NOP out. Treat a "wrong" key as normal operation that// silently produces garbage output, rather than a visible crash/refusal,// wherever that's workable for your use case.
 extern "C" JNIEXPORT jlong JNICALL
 Java_com_t4_protection_T4ProxyApplication_getRuntimeKey(JNIEnv *, jclass) {
     return (jlong)runtime_key();

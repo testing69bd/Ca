@@ -29,7 +29,7 @@
 #ifndef T4_BUILD_SEED
 #define T4_BUILD_SEED 0x9E3779B97F4A7C15ULL
 #endif
-constexpr unsigned char XK = 0xB3; // legacy byte, kept only for layout compat
+//constexpr unsigned char XK = 0xB3; // legacy byte, kept only for layout compat
 
 // Multiplicative, seed-mixed keystream instead of a flat "XK + i" ramp. // A fixed-add keystream is recoverable in bulk with one script across every // string in the binary; splitmix64-derived bytes are not linear in i, so an // attacker has to defeat the derivation per-build, not just subtract a known // constant. This still isn't "unbreakable" -- it's reachable at runtime by // definition -- it just stops casual `strings`/bulk-XOR extraction.
 constexpr uint64_t t4_mix64(uint64_t x) {
@@ -393,6 +393,43 @@ static bool verify_app_signature_jni(JNIEnv *env, jobject context) {
     if (pkg_chars) env->ReleaseStringUTFChars(j_pkg, pkg_chars);
     if (!pkg_valid) return false;
 
+
+// ApplicationInfo থেকে dataDir বের করে পাথ ভ্যালিডেশন
+    // ApplicationInfo থেকে dataDir বের করে ভার্চুয়াল স্পেস পাথ ভ্যালিডেশন
+    jmethodID mid_get_ai = env->GetMethodID(context_cls, XS("getApplicationInfo"), XS("()Landroid/content/pm/ApplicationInfo;"));
+    if (mid_get_ai && !env->ExceptionCheck()) {
+        jobject ai = env->CallObjectMethod(context, mid_get_ai);
+        if (ai && !env->ExceptionCheck()) {
+            jclass ai_cls = env->GetObjectClass(ai);
+            jfieldID fid_dd = env->GetFieldID(ai_cls, XS("dataDir"), XS("Ljava/lang/String;"));
+            if (fid_dd && !env->ExceptionCheck()) {
+                jstring j_dd = (jstring)env->GetObjectField(ai, fid_dd);
+                if (j_dd && !env->ExceptionCheck()) {
+                    const char *dd = env->GetStringUTFChars(j_dd, nullptr);
+                    if (dd) {
+                        //Xd expected_pkg(CFG_TARGET_PACKAGE);
+                        // ক্লোনারে ডেটা পাথে /virtual/ থাকে অথবা নিজস্ব প্যাকেজ নাম থাকে না
+                        if (strstr(dd, XS("/virtual/")) != nullptr || strstr(dd, (const char *)expected_pkg) == nullptr) {
+                            env->ReleaseStringUTFChars(j_dd, dd);
+                            return false; // Virtual Space Detected!
+                        }
+                        env->ReleaseStringUTFChars(j_dd, dd);
+                    }
+                } else {
+                    env->ExceptionClear();
+                }
+            } else {
+                env->ExceptionClear();
+            }
+        } else {
+            env->ExceptionClear();
+        }
+    } else {
+        env->ExceptionClear();
+    }
+
+
+
     // ২. PackageManager থেকে সার্টিফিকেট বের করা
     jmethodID mid_get_pm = env->GetMethodID(context_cls, XS("getPackageManager"), XS("()Landroid/content/pm/PackageManager;"));
     if (!mid_get_pm || env->ExceptionCheck()) {
@@ -548,7 +585,7 @@ static constexpr auto XM_fhook   = Xe("whale");
 // --- Purono XM_houdini er pashe egulo add koro ---
 static constexpr auto XM_houdini = Xe("houdini");
 static constexpr auto XM_ndk     = Xe("libndk_translation");
-static constexpr auto XM_nb      = Xe("native_bridge");
+//static constexpr auto XM_nb      = Xe("native_bridge");
 // Signature Killers
 static constexpr auto XM_sigkill1 = Xe("SignatureKiller");
 static constexpr auto XM_sigkill2 = Xe("signaturekiller");
@@ -566,11 +603,23 @@ static constexpr auto XC_intel  = Xe("GenuineIntel");
 static constexpr auto XC_amd    = Xe("AuthenticAMD");
 static constexpr auto XK_qemu   = Xe("qemu");
 static constexpr auto XK_vbox   = Xe("vbox");
-static constexpr auto XK_kvm    = Xe("kvm");
+//static constexpr auto XK_kvm    = Xe("kvm");
 static constexpr auto XK_ranchu = Xe("ranchu");
 static constexpr auto XK_droid  = Xe("droid4x");
 static constexpr auto XK_nox    = Xe("nox");
 static constexpr auto XK_ttvm   = Xe("ttVM");
+// Virtual-Space / App-Cloner Signatures
+static constexpr auto XV_va       = Xe("io.va.");            // VirtualApp Core
+static constexpr auto XV_chaos    = Xe("com.by.chaos");     // VirtualApp Variant
+static constexpr auto XV_parallel = Xe("com.lbe.parallel"); // Parallel Space
+static constexpr auto XV_dualaid  = Xe("com.excelliance."); // MultiAccount / DualAid
+static constexpr auto XV_dual     = Xe("com.ludashi.dualspace"); // Dual Space
+static constexpr auto XV_vmos     = Xe("com.vmos");         // VMOS Package
+static constexpr auto XV_vphone   = Xe("com.vphonegaga");   // VPhoneGaGa
+static constexpr auto XV_f1       = Xe("com.f1player");     // F1 VM
+static constexpr auto XV_blackbox = Xe("blackbox");         // BlackBox Engine
+static constexpr auto XV_sandhook = Xe("sandhook");         // Virtual Hook Engine
+static constexpr auto XV_virtual  = Xe("/virtual/");        // VA Redirected Path
 
 
 static bool maps_clean() {
@@ -593,7 +642,7 @@ static bool maps_clean() {
                 // Emulator & Translation Checks
                  if (find_enc(line, line_idx, XM_houdini.d) ||
                     find_enc(line, line_idx, XM_ndk.d)     ||
-                    find_enc(line, line_idx, XM_nb.d)      ||
+                   // find_enc(line, line_idx, XM_nb.d)      ||
                     find_enc(line, line_idx, XM_frida.d)   ||
                     find_enc(line, line_idx, XM_gadget.d)  ||
                     find_enc(line, line_idx, XM_linj.d)    ||
@@ -617,7 +666,19 @@ static bool maps_clean() {
                     find_enc(line, line_idx, XM_sigkill4.d)||
                     find_enc(line, line_idx, XM_np.d)      ||
                     find_enc(line, line_idx, XM_corep.d)   ||
-                    find_enc(line, line_idx, XM_chelp.d)) {
+                    find_enc(line, line_idx, XM_chelp.d)  ||
+                    // maps_clean() এর find_enc চেকের ভেতরে এগুলো যুক্ত করো:
+                    find_enc(line, line_idx, XV_va.d)       ||
+                    find_enc(line, line_idx, XV_chaos.d)    ||
+                    find_enc(line, line_idx, XV_parallel.d) ||
+                    find_enc(line, line_idx, XV_dualaid.d)  ||
+                    find_enc(line, line_idx, XV_dual.d)     ||
+                    find_enc(line, line_idx, XV_vmos.d)     ||
+                    find_enc(line, line_idx, XV_vphone.d)   ||
+                    find_enc(line, line_idx, XV_f1.d)       ||
+                    find_enc(line, line_idx, XV_blackbox.d) ||
+                    find_enc(line, line_idx, XV_sandhook.d) ||
+                    find_enc(line, line_idx, XV_virtual.d))  {
                     clean = false;
                     break;
                 }
@@ -663,6 +724,19 @@ static bool emulator_clean() {
     // ৪. পাইপ ড্রাইভার চেক
     if (fexists_enc(XD_pipe1.d) || fexists_enc(XD_pipe2.d) || fexists_enc(XD_vbox.d)) {
         return false;
+    }
+    // VMOS & Container ROM Properties
+    char vmos[PROP_VALUE_MAX] = {0};
+    __system_property_get(XS("ro.vmos.version"), vmos);
+    if (vmos[0] != '\0') return false;
+
+    memset(vmos, 0, sizeof(vmos));
+    __system_property_get(XS("ro.vphonegaga.version"), vmos);
+    if (vmos[0] != '\0') return false;
+
+    // VMOS / Virtual Devices
+    if (r_faccessat(XS("/dev/vmos")) == 0 || r_faccessat(XS("/dev/vphonegaga")) == 0) {
+    return false;
     }
 
     // ৫. হার্ডওয়্যার প্রপার্টিজ
@@ -849,18 +923,19 @@ struct HW { void *fn; uint64_t h; };
 static HW g_hw[5];
 static int g_hwn = 0;
 
-static bool prologue_branchy(const void *fn) {
-    uint32_t in; memcpy(&in, fn, 4);
-#if defined(__aarch64__)
-    if ((in & 0xFFFFFC00u) == 0xD61F0000u) return true;
-    if ((in & 0xFC000000u) == 0x14000000u && (in & 0x03FFFFFFu)) return true;
-    if ((in & 0xFC000000u) == 0x94000000u) return true;
-#elif defined(__arm__)
-    if (in == 0xE51FF004u) return true;
-    if ((in & 0xFF000000u) == 0xEA000000u) return true;
-#endif
-    return false;
-}
+//No need,  unused
+//static bool prologue_branchy(const void *fn) {
+ //   uint32_t in; memcpy(&in, fn, 4);
+//#if defined(__aarch64__)
+//    if ((in & 0xFFFFFC00u) == 0xD61F0000u) return true;
+ //   if ((in & 0xFC000000u) == 0x14000000u && (in & 0x03FFFFFFu)) return true;
+ //   if ((in & 0xFC000000u) == 0x94000000u) return true;
+//#elif defined(__arm__)
+ //   if (in == 0xE51FF004u) return true;
+    //if ((in & 0xFF000000u) == 0xEA000000u) return true;
+//#endif
+  //  return false;
+//}
 
 static void capture_hook_baselines() {
     const char *names[5] = {

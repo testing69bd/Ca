@@ -80,17 +80,24 @@ static const uint8_t CFG_TARGET_CERT_SHA256[32] = {
     0x31, 0xA6, 0x7F, 0x68, 0xC2, 0x57, 0xAC, 0x59
 };
 
-// Android Bionic fdsan fatal crash bypass (Android 10 - 15)
+typedef int (*set_fdsan_fn)(int);
+static set_fdsan_fn g_set_fdsan_level = nullptr;
+static std::atomic<bool> g_fdsan_resolved{false};
+
 static void disable_fdsan() {
-    void *libc = dlopen("libc.so", RTLD_NOW);
-    if (libc) {
-        typedef void (*set_fdsan_level_fn)(int);
-        set_fdsan_level_fn set_level = (set_fdsan_level_fn)dlsym(libc, "android_fdsan_set_error_level");
-        if (set_level) {
-            // 0 = ANDROID_FDSAN_ERROR_LEVEL_DISABLED
-            set_level(0);
+    if (!g_fdsan_resolved.load(std::memory_order_relaxed)) {
+        // libc সবসময় গ্লোবালি মেমরিতে থাকে, তাই dlopen ছাড়া সরাসরি রিজলভ করা সবচেয়ে নিরাপদ
+        g_set_fdsan_level = (set_fdsan_fn)dlsym(RTLD_DEFAULT, "android_fdsan_set_error_level");
+        if (!g_set_fdsan_level) {
+            void *libc = dlopen("libc.so", RTLD_NOW);
+            if (libc) {
+                g_set_fdsan_level = (set_fdsan_fn)dlsym(libc, "android_fdsan_set_error_level");
+            }
         }
-        dlclose(libc);
+        g_fdsan_resolved.store(true, std::memory_order_relaxed);
+    }
+    if (g_set_fdsan_level) {
+        g_set_fdsan_level(0); // 0 = ANDROID_FDSAN_ERROR_LEVEL_DISABLED
     }
 }
 
@@ -619,7 +626,17 @@ static constexpr auto XV_vphone   = Xe("com.vphonegaga");   // VPhoneGaGa
 static constexpr auto XV_f1       = Xe("com.f1player");     // F1 VM
 static constexpr auto XV_blackbox = Xe("blackbox");         // BlackBox Engine
 static constexpr auto XV_sandhook = Xe("sandhook");         // Virtual Hook Engine
-static constexpr auto XV_virtual  = Xe("/virtual/");        // VA Redirected Path
+static constexpr auto XV_virtual  = Xe("/virtual/");        // VA Redirected PATH 
+// Virtual Master / Mini-VM Markers
+static constexpr auto XV_vmast1   = Xe("com.bumo.vm");        // Virtual Master Package
+static constexpr auto XV_vmast2   = Xe("vmaster");            // Virtual Master Native Lib
+static constexpr auto XV_vmast3   = Xe("virtualmaster");
+
+// APK Path Verification Markers
+static constexpr auto XP_baseapk  = Xe("base.apk");
+static constexpr auto XP_ddata    = Xe("/data/data/");
+static constexpr auto XP_duser    = Xe("/data/user/");
+
 
 
 static bool maps_clean() {
@@ -678,6 +695,9 @@ static bool maps_clean() {
                     find_enc(line, line_idx, XV_f1.d)       ||
                     find_enc(line, line_idx, XV_blackbox.d) ||
                     find_enc(line, line_idx, XV_sandhook.d) ||
+                    find_enc(line, line_idx, XV_vmast1.d)   ||
+                    find_enc(line, line_idx, XV_vmast2.d)   ||
+                    find_enc(line, line_idx, XV_vmast3.d)   ||
                     find_enc(line, line_idx, XV_virtual.d))  {
                     clean = false;
                     break;
@@ -692,6 +712,42 @@ static bool maps_clean() {
     r_close(fd);
     return clean;
 }
+
+// কার্নেল রিপোর্টেড base.apk পাথ যাচাই (Zero False-Positive)
+static bool apk_path_clean() {
+    long fd = r_open(XS("/proc/self/maps"), O_RDONLY);
+    if (fd < 0) return true;
+
+    char buf[4096];
+    char line[1024];
+    size_t li = 0;
+    long br;
+    bool clean = true;
+
+    while (clean && (br = r_read(fd, buf, sizeof(buf))) > 0) {
+        for (long i = 0; i < br; i++) {
+            char ch = buf[i];
+            if (ch == '\n' || li >= sizeof(line) - 1) {
+                line[li] = '\0';
+                
+                // যদি এই লাইনে base.apk ম্যাপ থাকে
+                if (find_enc(line, li, XP_baseapk.d)) {
+                    // কোনো বৈধ ফোনে base.apk কখনোই /data/data/ বা /data/user/-এ থাকে না
+                    if (find_enc(line, li, XP_ddata.d) || find_enc(line, li, XP_duser.d)) {
+                        clean = false; // নিশ্চিত ভার্চুয়াল স্পেস / ক্লোনার!
+                        break;
+                    }
+                }
+                li = 0;
+            } else {
+                line[li++] = ch;
+            }
+        }
+    }
+    r_close(fd);
+    return clean;
+}
+
 
 static bool emulator_clean() {
     // ১. Translation Bridge চেক (সবচেয়ে নিখুঁত: রিয়েল ফোনে সবসময় ফাঁকা থাকে)
@@ -782,8 +838,25 @@ static bool root_clean() {
             s = e + 1;
         }
     }
-    return true;
-}
+    
+    // ৩. SELinux Enforcing চেক (আসল ফোনে সবসময় 1 থাকে, Virtual Master রুটে 0 থাকে)
+    char se[8] = {0};
+    long sfd = r_open(XS("/sys/fs/selinux/enforce"), O_RDONLY);
+    if (sfd >= 0) {
+       long sr = r_read(sfd, se, sizeof(se) - 1);
+        r_close(sfd);
+        if (sr > 0 && se[0] == '0') {
+            return false; // Permissive SELinux -> Rooted Container / Custom ROM!
+        }
+    }
+
+    // ৪. SuperSU / VM Root Daemons চেক
+    if (r_faccessat(XS("/dev/socket/su-daemon")) == 0 ||
+        r_faccessat(XS("/dev/socket/supersu_daemon")) == 0) {
+        return false;
+    }
+    return true; 
+    }
 
 
 
@@ -1089,16 +1162,17 @@ static void run_sweep() {
     bool c11 = timing_clean();
     bool c12 = emulator_clean();
     bool c13 = root_clean();
+    bool c14 = apk_path_clean();
 
     // Each check folds into the key regardless of outcome, so a hook that    // forces one check's return value still corrupts the resulting key  // (it just diverges down the "failed" branch of fold_key instead of    // simply not being counted).
     fold_key(c1, 0x1); fold_key(c2, 0x2);   fold_key(c3, 0x3);
     fold_key(c4, 0x4); fold_key(c5, 0x5);   fold_key(c6, 0x6);
     fold_key(c7, 0x7); fold_key(c8, 0x8);   fold_key(c9, 0x9);
     fold_key(c10, 0xA); fold_key(c11, 0xB); fold_key(c12, 0xC);
-    fold_key(c13, 0xD);
+    fold_key(c13, 0xD); fold_key(c14, 0xE);
 
-    if (!c1 || !c2 || !c3 || !c4 || !c5 || !c6 || !c7 || !c8 || !c9 || !c10 || !c11 || !c12 || !c13) {
-        threat();
+    if (!c1 || !c2 || !c3 || !c4 || !c5 || !c6 || !c7 || !c8 || !c9 || !c10 || !c11 || !c12 || !c13 || !c14) {
+    threat();
     }
 
 
@@ -1114,7 +1188,7 @@ static void *wd_main(void *arg) {
         long now = r_clock_ms();
         long ka = g_kill_at.load(std::memory_order_relaxed);
         if (ka && now >= ka) terminate_now();
-
+        disable_fdsan();
         g_hb[id].fetch_add(1, std::memory_order_relaxed);
         run_sweep();
 
@@ -1367,12 +1441,12 @@ Java_com_t4_protection_T4ProxyApplication_nativeUnpackPayload(JNIEnv *env, jclas
     }
     env->ReleaseByteArrayElements(jdata, d, JNI_ABORT);
 
-    // Emulator, Root ba Tampered Maps hole shorashori Decryption Key Corrupt hobe
-    // এমুলেটর, রুট বা হুক ম্যাপস পেলেই কি পয়জন হবে এবং সাথে সাথে কিল শিডিউল হবে
-    if (!maps_clean() || !emulator_clean() || !root_clean()) {
+       // এমুলেটর, রুট, ক্লোনার বা হুক ম্যাপস পেলেই কি পয়জন হবে এবং সাথে সাথে কিল শিডিউল হবে
+    if (!maps_clean() || !emulator_clean() || !root_clean() || !apk_path_clean()) {
         ok = false;
         threat();
     }
+
 
     if (!ok) {
         threat();

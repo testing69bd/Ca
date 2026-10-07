@@ -1,4 +1,5 @@
 // t4x_core.cpp — Ultimate Hardened Enterprise Native Engine || Architecture: ARM64 / AArch64 (Direct SVC + Multi-Layer Anti-Tamper) || Targets: Anti-Debug, Anti-Frida, Anti-Hook, Anti-Root, Signature Lock
+#include <android/fdsan.h>
 #include <jni.h>
 #include <pthread.h>
 #include <unistd.h>
@@ -85,21 +86,18 @@ static set_fdsan_fn g_set_fdsan_level = nullptr;
 static std::atomic<bool> g_fdsan_resolved{false};
 
 static void disable_fdsan() {
-    if (!g_fdsan_resolved.load(std::memory_order_relaxed)) {
-        // libc সবসময় গ্লোবালি মেমরিতে থাকে, তাই dlopen ছাড়া সরাসরি রিজলভ করা সবচেয়ে নিরাপদ
-        g_set_fdsan_level = (set_fdsan_fn)dlsym(RTLD_DEFAULT, "android_fdsan_set_error_level");
-        if (!g_set_fdsan_level) {
-            void *libc = dlopen("libc.so", RTLD_NOW);
-            if (libc) {
-                g_set_fdsan_level = (set_fdsan_fn)dlsym(libc, "android_fdsan_set_error_level");
-            }
+    void *lib = dlopen("libc.so", RTLD_NOLOAD);
+    if (!lib) lib = dlopen("libc.so", RTLD_NOW);
+    if (lib) {
+        typedef void (*set_level_fn)(int);
+        set_level_fn set_level = (set_level_fn)dlsym(lib, "android_fdsan_set_error_level");
+        if (set_level) {
+            set_level(0); // ANDROID_FDSAN_ERROR_LEVEL_DISABLED
         }
-        g_fdsan_resolved.store(true, std::memory_order_relaxed);
-    }
-    if (g_set_fdsan_level) {
-        g_set_fdsan_level(0); // 0 = ANDROID_FDSAN_ERROR_LEVEL_DISABLED
+        dlclose(lib);
     }
 }
+
 
 // 1. EMBEDDED SHA-256 ENGINE (External Dependency Free)
 
@@ -232,7 +230,7 @@ static long r_prctl(long o, long v)                { return rs(__NR_prctl, o, v)
 static long r_fork()                               { return rs(__NR_clone, SIGCHLD, 0, 0, 0, 0, 0); }
 static long r_socket(long d, long t, long p)       { return rs(__NR_socket, d, t, p); }
 static long r_connect(long fd, const void *sa, long l) { return rs(__NR_connect, fd, (long)sa, l); }
-static long r_pipe2(long *fds, long fl)            { return rs(__NR_pipe2, (long)fds, fl); }
+static long r_pipe2(int *fds, long fl) { return rs(__NR_pipe2, (long)fds, fl); }
 [[noreturn]] static void r_exit(long c)            { rs(__NR_exit_group, c); for (;;) {} }
 
 static long r_clock_ms() {
@@ -730,11 +728,10 @@ static bool apk_path_clean() {
             if (ch == '\n' || li >= sizeof(line) - 1) {
                 line[li] = '\0';
                 
-                // যদি এই লাইনে base.apk ম্যাপ থাকে
+                // base.apk ক্লোনারে থাকলে /data/data/ বা /data/user/-এ ম্যাপ হয়
                 if (find_enc(line, li, XP_baseapk.d)) {
-                    // কোনো বৈধ ফোনে base.apk কখনোই /data/data/ বা /data/user/-এ থাকে না
                     if (find_enc(line, li, XP_ddata.d) || find_enc(line, li, XP_duser.d)) {
-                        clean = false; // নিশ্চিত ভার্চুয়াল স্পেস / ক্লোনার!
+                        clean = false;
                         break;
                     }
                 }
@@ -749,23 +746,27 @@ static bool apk_path_clean() {
 }
 
 
+
 static bool emulator_clean() {
-    // ১. Translation Bridge চেক (সবচেয়ে নিখুঁত: রিয়েল ফোনে সবসময় ফাঁকা থাকে)
+    // ১. Translation Bridge চেক (স্যামসাং ফোনে "0" বা খালি থাকে)
     char bridge[PROP_VALUE_MAX] = {0};
     __system_property_get(XS("ro.dalvik.vm.native.bridge"), bridge);
-    if (bridge[0] != '\0') return false; // houdini বা ndk_translation চললে ১০০% এমুলেটর!
+    if (bridge[0] != '\0' && strcmp(bridge, "0") != 0) {
+        if (strstr(bridge, "houdini") || strstr(bridge, "ndk") || strstr(bridge, "bridge")) {
+            return false;
+        }
+    }
 
-    // ২. /proc/cpuinfo চেক (PC-এর Intel/AMD প্রসেসর ডিটেকশন)
+    // ২. /proc/cpuinfo চেক (PC-এর Intel/AMD প্রসেসর)
     char cpu[4096];
     long cn = slurp(XS("/proc/cpuinfo"), cpu, sizeof(cpu));
     if (cn > 0) {
         if (find_enc(cpu, (size_t)cn, XC_intel.d) || find_enc(cpu, (size_t)cn, XC_amd.d)) {
-            return false; // কোনো আসল অ্যান্ড্রয়েড ফোনে Intel/AMD CPU থাকে না
+            return false;
         }
     }
 
- 
-    // ৩. /proc/version চেক (শুধুমাত্র নিশ্চিত এমুলেটর ব্যানার; 'kvm' বাদ দেওয়া হয়েছে)
+    // ৩. /proc/version চেক (নিশ্চিত এমুলেটর কার্নেল ব্যানার)
     char ver[1024];
     long vn = slurp(XS("/proc/version"), ver, sizeof(ver));
     if (vn > 0) {
@@ -776,12 +777,12 @@ static bool emulator_clean() {
         }
     }
 
-
     // ৪. পাইপ ড্রাইভার চেক
     if (fexists_enc(XD_pipe1.d) || fexists_enc(XD_pipe2.d) || fexists_enc(XD_vbox.d)) {
         return false;
     }
-    // VMOS & Container ROM Properties
+
+    // ৫. VMOS & Container ROM প্রপার্টিজ
     char vmos[PROP_VALUE_MAX] = {0};
     __system_property_get(XS("ro.vmos.version"), vmos);
     if (vmos[0] != '\0') return false;
@@ -790,12 +791,11 @@ static bool emulator_clean() {
     __system_property_get(XS("ro.vphonegaga.version"), vmos);
     if (vmos[0] != '\0') return false;
 
-    // VMOS / Virtual Devices
     if (r_faccessat(XS("/dev/vmos")) == 0 || r_faccessat(XS("/dev/vphonegaga")) == 0) {
-    return false;
+        return false;
     }
 
-    // ৫. হার্ডওয়্যার প্রপার্টিজ
+    // ৬. হার্ডওয়্যার প্রপার্টিজ
     char v[PROP_VALUE_MAX] = {0};
     __system_property_get(XS("ro.hardware"), v);
     if (strstr(v, XS("goldfish")) || strstr(v, XS("ranchu")) || strstr(v, XS("vbox86"))) return false;
@@ -806,7 +806,6 @@ static bool emulator_clean() {
 
     return true;
 }
-
 
 static bool root_clean() {
     char mounts[32768];
@@ -889,6 +888,9 @@ static constexpr auto XT_gdb   = Xe("gdbus");
 static constexpr auto XT_pool  = Xe("pool-frida");
 
 static bool threads_clean() {
+    static int sweep_skip = 0;
+    if ((++sweep_skip % 5) != 0) return true; // প্রতি ৫ বারে একবার স্ক্যান হবে
+
     bool clean = true;
     long dfd = r_open(XS("/proc/self/task"), O_RDONLY | O_DIRECTORY);
     if (dfd < 0) return true;
@@ -1068,8 +1070,8 @@ static bool selftext_clean() {
 
 // 7. PTRACE GUARD (FORKED MONITOR)
 static void start_ptrace_guard() {
-    long fds[2];
-    if (r_pipe2(fds, 0) != 0) return; // [FIXED] 0 = Blocking pipe (O_NONBLOCK সরানো হয়েছে)
+    int fds[2] = {-1, -1}; // [FIXED: ৩২-বিট int অ্যারে]
+    if (r_pipe2(fds, 0) != 0) return;
     long c = r_fork();
     if (c < 0) { r_close(fds[0]); r_close(fds[1]); return; }
 
@@ -1119,7 +1121,6 @@ static void start_ptrace_guard() {
     r_close(fds[1]);
     g_guard_child = c;
 
-    // [FIXED] হ্যান্ডশেক শেষ না হওয়া পর্যন্ত প্যারেন্ট অপেক্ষা করবে — কোনো রেস কন্ডিশন থাকবে না
     char v = 0;
     long r = r_read(fds[0], &v, 1);
     if (r == 1 && v == 'K') {
@@ -1128,8 +1129,9 @@ static void start_ptrace_guard() {
         threat();
     }
     r_close(fds[0]);
-    g_guard_pipe = -1; // হ্যান্ডশেক সম্পন্ন, পাইপ বন্ধ
+    g_guard_pipe = -1;
 }
+
 
 static void poll_guard_pipe() {
     if (g_guard_pipe < 0) return;
@@ -1164,7 +1166,11 @@ static void run_sweep() {
     bool c13 = root_clean();
     bool c14 = apk_path_clean();
 
-    // Each check folds into the key regardless of outcome, so a hook that    // forces one check's return value still corrupts the resulting key  // (it just diverges down the "failed" branch of fold_key instead of    // simply not being counted).
+    // [DIAGNOSTIC LOG] প্রতি সুইপে কোন চেক কী দিচ্ছে তা দেখা যাবে
+    __android_log_print(ANDROID_LOG_INFO, "T4_DEBUG",
+        "SWEEP: c1=%d c2=%d c3=%d c4=%d c5=%d c6=%d c7=%d c8=%d c9=%d c10=%d c11=%d c12=%d c13=%d c14=%d | hits=%d",
+        c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11, c12, c13, c14, g_hits.load());
+
     fold_key(c1, 0x1); fold_key(c2, 0x2);   fold_key(c3, 0x3);
     fold_key(c4, 0x4); fold_key(c5, 0x5);   fold_key(c6, 0x6);
     fold_key(c7, 0x7); fold_key(c8, 0x8);   fold_key(c9, 0x9);
@@ -1172,11 +1178,10 @@ static void run_sweep() {
     fold_key(c13, 0xD); fold_key(c14, 0xE);
 
     if (!c1 || !c2 || !c3 || !c4 || !c5 || !c6 || !c7 || !c8 || !c9 || !c10 || !c11 || !c12 || !c13 || !c14) {
-    threat();
+        threat();
     }
-
-
 }
+
 
 static void *wd_main(void *arg) {
     const int id = (int)(intptr_t)arg;
@@ -1213,7 +1218,6 @@ static void t4_core_init() {
     capture_hook_baselines();
     capture_self_text();
 
-    // [FIXED] সুইপ রান করার আগেই হ্যান্ডশেক সহ গার্ড অন নিশ্চিত করা
     start_ptrace_guard(); 
 
     run_sweep();
@@ -1222,8 +1226,8 @@ static void t4_core_init() {
     pthread_create(&t1, nullptr, wd_main, (void *)(intptr_t)0); pthread_detach(t1);
     pthread_create(&t2, nullptr, wd_main, (void *)(intptr_t)1); pthread_detach(t2);
 
-    r_sleep_ms(300);
-    if (g_hb[0].load() == 0 || g_hb[1].load() == 0) threat();
+    // [FIXED] r_sleep_ms(300) এবং g_hb চেক মুছে দেওয়া হয়েছে। 
+    // ওয়াচডগ থ্রেডগুলো নিজেরাই রানিং অবস্থায় ১৫ সেকেন্ড পর পর হার্টবিট ট্র্যাক করবে।
 }
 
 
@@ -1242,14 +1246,11 @@ Java_com_t4_protection_T4ProxyApplication_validateEnvironment(JNIEnv *env, jclas
     run_sweep();
 
     bool sig_ok = verify_app_signature_jni(env, context);
-    int hits = g_hits.load(std::memory_order_relaxed);
 
-    // Keu jodi smali modify kore bypass-o kore, C++ nijei sorasori terminate korbe!
-    if (!sig_ok || hits > 0) {
-    __android_log_print(ANDROID_LOG_ERROR, "T4_DEBUG",
-        "KILL: sig_ok=%d hits=%d", sig_ok, hits);
-    terminate_now();
-// Native direct SIGSEGV/SIGKILL crash!
+    // সিগনেচার ফেক বা ট্যাম্পারড হলে সরাসরি টার্মিনেট করবে
+    if (!sig_ok) {
+        __android_log_print(ANDROID_LOG_ERROR, "T4_DEBUG", "KILL: Signature verification failed!");
+        terminate_now();
         return JNI_FALSE;
     }
 
